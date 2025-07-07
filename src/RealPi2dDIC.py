@@ -36,6 +36,9 @@ v. matplotlib
 Hardware Dependencies:
 i. Raspberry Pi + Raspbian OS
 ii. Picamera Module v2
+
+Module updated on : 07/07/2025 to use picamera2 library by @bobbydoc02 on github.com
+
 '''
 
 import time
@@ -50,15 +53,17 @@ import numpy as np
 import cv2
 from matplotlib import pyplot as plt
 import scipy.interpolate
-import picamera
-camera = picamera.PiCamera()
+from libcamera import controls  # For low-level control of camera parameters
+import picamera2
+camera = picamera2.Picamera2()
+
 
 surface_grid = []  # points on surface are stored in this array
 # correlation window size (in pixels) for Lucas Kanade Method for optical
 # flow measurement # can be changed based on speckle pattern type (see documentation)
-lk_window_size = (65, 65)
+lk_window_size = (151,151)
 # the size in pixel of the interval (dx,dy) of the correlation grid
-lk_grid_size = (10, 10)
+lk_grid_size = (31, 31)
 area = []
 cropping = False
 
@@ -403,37 +408,54 @@ def write_img_data(raw_Image_Data_File, image, points):
 
 
 def capture_Parameters():
-    """UI to check Brightness, Contrast, ISO and Exposure compensation of picamera and define values"""
+    """UI to check Brightness, Contrast, ISO and Exposure compensation of picamera2 and define values"""
 
     def nothing(x):
         pass
 
+    # Create OpenCV window with trackbars
     cv2.namedWindow('Press_C_to_Confirm')
     cv2.createTrackbar('Brightness', 'Press_C_to_Confirm', 50, 100, nothing)
     cv2.createTrackbar('Contrast', 'Press_C_to_Confirm', 50, 100, nothing)
     cv2.createTrackbar('Exposure', 'Press_C_to_Confirm', 25, 50, nothing)
-    cv2.createTrackbar('ISO', 'Press_C_to_Confirm', 1, 1600, nothing)
-    camera.exposure_mode = 'beach'  # Can be changed. Follow picamera documentation
-    camera.awb_mode = 'tungsten'  # Can be changed. Follow picamera documentation
-    camera.start_preview(fullscreen=False, window=(600, 400, 640, 480))
+    cv2.createTrackbar('ISO', 'Press_C_to_Confirm', 100, 1600, nothing)  # ISO starts from 100
+
+    # Configure and start the camera
+    preview_config = camera.create_preview_configuration(main={"size": (640, 480)})
+    camera.configure(preview_config)
+    camera.start(show_preview=False)  # show_preview=False disables Qt preview window
+
     while True:
         brightness = cv2.getTrackbarPos("Brightness", "Press_C_to_Confirm")
-        camera.brightness = brightness
         contrast = cv2.getTrackbarPos("Contrast", "Press_C_to_Confirm")
-        camera.contrast = contrast
-        expos = cv2.getTrackbarPos("Exposure", "Press_C_to_Confirm")
-        expos = int(expos - 25)
-        camera.exposure_compensation = expos
+        exposure = cv2.getTrackbarPos("Exposure", "Press_C_to_Confirm") - 25  # from -25 to +25
         iso = cv2.getTrackbarPos("ISO", "Press_C_to_Confirm")
-        camera.iso = iso
+
+        # Set camera controls using libcamera Controls
+        try:
+            camera.set_controls({
+                # Brightness and contrast must be scaled between 0.0 and 1.0, or -1.0 to 1.0 depending on the setting.
+                controls.Brightness: (brightness - 50) / 50.0,  # scale 0–100 to -1.0–1.0
+                controls.Contrast: (contrast - 50) / 50.0,      # scale 0–100 to -1.0–1.0
+                # controls.AeExposureCompensation: exposure,
+                controls.AnalogueGain: iso / 100.0  # Approximate; gain replaces ISO in many use cases
+            })
+        except Exception as e:
+            print("Warning: Some camera controls are not supported on this device or libcamera version.")
+            print("Error details:", e)
+
         k = cv2.waitKey(1) & 0xFF
         if k == ord('c'):
-            camera.stop_preview()
             cv2.destroyAllWindows()
             break
-    # This can be changed based on the processing power and speed of the device
-    # For maximum resolution, check picamera documentation
-    camera.resolution = (1920, 1080)
+
+    # After confirmation, reconfigure the camera for higher resolution
+    camera.stop()  # Stop the camera to apply new settings
+    still_config = camera.create_still_configuration(main={"size": (1920, 1080)})
+    camera.configure(still_config)
+
+# Example usage
+# capture_Parameters()
 
 
 def displacement_Compute(point, pointf):
@@ -636,15 +658,23 @@ def DIC_Run(image_Path, file_Name, window_Size_px, mesh_size_px,
     """
 
     capture_Parameters()
-    camera.start_preview()
-    time.sleep(1)
+    camera.start()  # Start the camera after setting parameters
+    time.sleep(1)  # Give camera time to stabilize after parameter capture
+
     file_location = './Test_%s/' % file_Name
-    shutil.rmtree(file_location)
+
+    # Safely delete old test folder if it exists
+    shutil.rmtree(file_location, ignore_errors=True)
+
+    # Create new test folder
     if not os.path.exists(file_location):
         os.mkdir(file_location)
 
-    camera.capture(file_location + '0.jpg')
-    camera.stop_preview()
+    # Capture and save the image using picamera2 (camera already started/configured)
+    camera.capture_file(file_location + '0.jpg')
+
+    # Stop the camera after capture (not necessary if you want to keep capturing)
+    # camera.stop()
     img_ref = cv2.imread(file_location + '0.jpg', 0)
     img_list = sorted(glob.glob(image_Path), key=lambda t: os.stat(t).st_mtime)
 
@@ -695,7 +725,9 @@ def DIC_Run(image_Path, file_Name, window_Size_px, mesh_size_px,
         img_list = sorted(glob.glob(image_Path),
                           key=lambda t: os.stat(t).st_mtime)
         image_ref = cv2.imread(img_list[i], 0)
-        camera.capture(file_location + '%i.jpg' % (i + 1))
+        # camera.capture(file_location + '%i.jpg' % (i + 1))
+
+        camera.capture_file(file_location + '%i.jpg' % (i + 1))
         img_list = sorted(glob.glob(image_Path),
                           key=lambda t: os.stat(t).st_mtime)
         image_str = cv2.imread(img_list[i + 1], 0)
@@ -746,3 +778,5 @@ while True:
 
 DIC_Run('./Test_%s/*.jpg' % file_Name, file_Name,
         lk_window_size, lk_grid_size, "rawdata_%s.txt" % file_Name)
+
+# increase spacing between control points 
